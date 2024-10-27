@@ -21,55 +21,91 @@ package main
 import (
   "fmt"
   "log"
-  //"encoding/json"
+  "strconv"
+  "encoding/json"
   "go.bug.st/serial"
 )
 
 const (
+  ResetReason  = "?R\r\n"
   PartNumber   = "?P\r\n"
   SerialNumber = "?N\r\n"
   MilesPerHour = "US\r\n"
   
+  Reset = "{\"Reset\" : \"Board was reset."
+  USBActive = "{\"USB\" : \"USB Interface Active\""
 )
 
 func B(s string) []byte {
   return []byte(s)
 }
 
-func initOPS243(port serial.Port) {
 
-  buff := make([]byte, 512)
+func readPort(port serial.Port) string {
+  buff := make([]byte, 128)
+  n, _ := port.Read(buff)
+  opsStr   := string(buff[:n])
+  return opsStr  
+}
+
+func readPortJSON(port serial.Port) string {
+  buff := make([]byte, 128)
   n    := 0
 
-  port.Write(B(PartNumber))
   buff[0] = 0
-  
+
   for buff[0] != '{' {
     n, _ = port.Read(buff)
   }
+  opsStr   := string(buff[:n])
+  return opsStr  
+}
 
-  fmt.Printf("%s", string(buff[:n]))
+var OPS243 struct {
+  product string
+  serial string
+}
+
+var partNumber struct {
+  Product string `json:"Product"`
+}
+
+var serialNumber struct {
+  SerialNumber string `json:"SerialNumber"`
+}
+
+
+func initOPS243(port serial.Port) {
+
+  port.Write(B(PartNumber))
+
+  response := readPortJSON(port)
+  fmt.Print(response)
+  if err := json.Unmarshal([]byte(response), &partNumber); err != nil {
+    log.Fatal("Fatal:  ", err)
+  }
+
+  OPS243.product = partNumber.Product
+
+  log.Print("Get serial number")
 
   port.Write(B(SerialNumber))
-  buff[0] = 0
-  
-  for buff[0] != '{' {
-    n, _ = port.Read(buff)
+  response = readPortJSON(port)
+  fmt.Print(response)
+  if err := json.Unmarshal([]byte(response), &serialNumber); err != nil {
+    log.Fatal("Fatal:  ", err)
   }
 
-  fmt.Printf("%s", string(buff[:n]))
+  OPS243.serial = serialNumber.SerialNumber
 
   // Set output units to miles per hour
-  port.Write(B(MilesPerHour))
-  buff[0] = 0
-  
-  for buff[0] != '{' {
-    n, _ = port.Read(buff)
-  }
+  //port.Write(B(MilesPerHour))
 
-  fmt.Printf("%s", string(buff[:n]))
-
+  //milesPerHour := readPort(port)
+  fmt.Printf("Product:  %s, Serial:  %s",  OPS243.product, OPS243.serial)
   
+  //fmt.Println(milesPerHour)
+ 
 }
 
 func main() {
@@ -84,10 +120,20 @@ func main() {
     log.Fatal(err)
   }
 
+  ready := false
+  for !ready {
+    reading := readPort(port)
+    _, err := strconv.ParseFloat(reading, 32)
+    if err != nil {
+      fmt.Println("Receiving OPS243 readings, ready!")
+      ready = true 
+    }
+  }
+
   initOPS243(port)
 
   // Get speed
-  buff := make([]byte, 512)
+  buff := make([]byte, 128)
   for {
     n, _ := port.Read(buff)
     fmt.Printf("%s", string(buff[:n]))
