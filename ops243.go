@@ -21,6 +21,7 @@ package main
 import (
   "fmt"
   "log"
+  "strings"
   "strconv"
   "encoding/json"
   "go.bug.st/serial"
@@ -44,7 +45,8 @@ func B(s string) []byte {
 func readPort(port serial.Port) string {
   buff := make([]byte, 128)
   n, _ := port.Read(buff)
-  opsStr   := string(buff[:n])
+  opsStr   := strings.TrimSpace(string(buff[:n]))
+  
   return opsStr  
 }
 
@@ -123,10 +125,12 @@ func main() {
   ready := false
   for !ready {
     reading := readPort(port)
-    _, err := strconv.ParseFloat(reading, 32)
-    if err != nil {
+    _, err := strconv.ParseFloat(reading, 64)
+    if err == nil {
       fmt.Println("Receiving OPS243 readings, ready!")
       ready = true 
+    } else {
+      fmt.Println("Synchronizing")
     }
   }
 
