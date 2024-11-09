@@ -1,12 +1,12 @@
-/* 
+/*
 Copyright 2024 iAchieved.it LLC
 
 Permission to use, copy, modify, and/or distribute this software for any
-purpose with or without fee is hereby granted, provided that the above 
+purpose with or without fee is hereby granted, provided that the above
 copyright notice and this permission notice appear in all copies.
 
 THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
-REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY 
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
 AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
 INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
 LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE
@@ -19,129 +19,196 @@ SPDX-License-Identifier: ISC
 package main
 
 import (
-  "fmt"
-  "log"
-  "strings"
-  "strconv"
-  "encoding/json"
-  "go.bug.st/serial"
+	"encoding/json"
+	"fmt"
+	"log"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/pebbe/zmq4"
+	"go.bug.st/serial"
 )
 
 const (
-  ResetReason  = "?R\r\n"
-  PartNumber   = "?P\r\n"
-  SerialNumber = "?N\r\n"
-  MilesPerHour = "US\r\n"
-  
-  Reset = "{\"Reset\" : \"Board was reset."
-  USBActive = "{\"USB\" : \"USB Interface Active\""
+	ResetReason  = "?R"
+	PartNumber   = "?P"
+	SerialNumber = "?N"
+	MilesPerHour = "US"
+	SpeedFilter  = "R>5\r"
+
+	Reset     = "{\"Reset\" : \"Board was reset."
+	USBActive = "{\"USB\" : \"USB Interface Active\""
 )
 
 func B(s string) []byte {
-  return []byte(s)
+	return []byte(s)
 }
 
-
 func readPort(port serial.Port) string {
-  buff := make([]byte, 128)
-  n, _ := port.Read(buff)
-  opsStr   := strings.TrimSpace(string(buff[:n]))
-  
-  return opsStr  
+	buff := make([]byte, 128)
+	n, _ := port.Read(buff)
+	opsStr := strings.TrimSpace(string(buff[:n]))
+
+	return opsStr
 }
 
 func readPortJSON(port serial.Port) string {
-  buff := make([]byte, 128)
-  n    := 0
+	buff := make([]byte, 128)
+	n := 0
 
-  buff[0] = 0
+	buff[0] = 0
 
-  for buff[0] != '{' {
-    n, _ = port.Read(buff)
-  }
-  opsStr   := string(buff[:n])
-  return opsStr  
+	for buff[0] != '{' {
+		n, _ = port.Read(buff)
+	}
+	opsStr := string(buff[:n])
+	return opsStr
 }
 
 var OPS243 struct {
-  product string
-  serial string
+	product string
+	serial  string
+	units   string
 }
 
 var partNumber struct {
-  Product string `json:"Product"`
+	Product string `json:"Product"`
 }
 
 var serialNumber struct {
-  SerialNumber string `json:"SerialNumber"`
+	SerialNumber string `json:"SerialNumber"`
 }
 
+var speedUnits struct {
+	Units string `json:"Units"`
+}
 
+// Initialize the OPS243 sensor
+//
+// Initialization consists of reading the part number, serial number,
+// and finally, setting the output units to miles per hour
 func initOPS243(port serial.Port) {
 
-  port.Write(B(PartNumber))
+	port.Write(B(PartNumber))
 
-  response := readPortJSON(port)
-  fmt.Print(response)
-  if err := json.Unmarshal([]byte(response), &partNumber); err != nil {
-    log.Fatal("Fatal:  ", err)
-  }
+	response := readPortJSON(port)
+	fmt.Print(response)
+	if err := json.Unmarshal([]byte(response), &partNumber); err != nil {
+		log.Fatal("Fatal:  ", err)
+	}
 
-  OPS243.product = partNumber.Product
+	OPS243.product = partNumber.Product
 
-  log.Print("Get serial number")
+	log.Print("Get serial number")
 
-  port.Write(B(SerialNumber))
-  response = readPortJSON(port)
-  fmt.Print(response)
-  if err := json.Unmarshal([]byte(response), &serialNumber); err != nil {
-    log.Fatal("Fatal:  ", err)
-  }
+	port.Write(B(SerialNumber))
+	response = readPortJSON(port)
+	fmt.Print(response)
+	if err := json.Unmarshal([]byte(response), &serialNumber); err != nil {
+		log.Fatal("Fatal:  ", err)
+	}
 
-  OPS243.serial = serialNumber.SerialNumber
+	OPS243.serial = serialNumber.SerialNumber
 
-  // Set output units to miles per hour
-  //port.Write(B(MilesPerHour))
+	// Set output units to miles per hour
 
-  //milesPerHour := readPort(port)
-  fmt.Printf("Product:  %s, Serial:  %s",  OPS243.product, OPS243.serial)
-  
-  //fmt.Println(milesPerHour)
- 
+	fmt.Println("Setting speed units to miles per hour")
+
+	port.Write(B(MilesPerHour))
+	response = readPortJSON(port)
+	if err := json.Unmarshal([]byte(response), &speedUnits); err != nil {
+		log.Fatal("Fatal:  ", err)
+	}
+	OPS243.units = speedUnits.Units
+
+	port.Write(B(SpeedFilter))
+	response = readPortJSON(port) // TODO:  Check for success
+	fmt.Println(response)
+
+	fmt.Printf("Product:  %s, Serial:  %s\n", OPS243.product, OPS243.serial)
+
+	fmt.Println(OPS243.units)
+
+}
+
+// SpeedEvent
+type SpeedEvent struct {
+	Type      string  `json:"type"`
+	Timestamp string  `json:"timestamp"`
+	Reading   float64 `json:"reading"`
+	Units     string  `json:"units"`
+	UUID      string  `json:"uuid"`
 }
 
 func main() {
 
-  mode := &serial.Mode {
-    BaudRate:  115200,
-  }
+	publisher, err := zmq4.NewSocket(zmq4.PUB)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer publisher.Close()
 
-  port, err := serial.Open("/dev/ttyACM0", mode)
+	err = publisher.Bind("tcp://*:11205")
+	if err != nil {
+		log.Fatal(err)
+	}
 
-  if err != nil {
-    log.Fatal(err)
-  }
+	log.Println("ZeroMQ running")
 
-  ready := false
-  for !ready {
-    reading := readPort(port)
-    _, err := strconv.ParseFloat(reading, 64)
-    if err == nil {
-      fmt.Println("Receiving OPS243 readings, ready!")
-      ready = true 
-    } else {
-      fmt.Println("Synchronizing")
-    }
-  }
+	topic := "speed/events"
 
-  initOPS243(port)
+	mode := &serial.Mode{
+		BaudRate: 115200,
+	}
 
-  // Get speed
-  buff := make([]byte, 128)
-  for {
-    n, _ := port.Read(buff)
-    fmt.Printf("%s", string(buff[:n]))
-  }
+	port, err := serial.Open("/dev/ttyACM0", mode)
 
-  fmt.Println("Exiting")
+	if err != nil {
+		log.Println("Error opening serial port")
+		log.Fatal(err)
+	}
+
+	log.Println("Synchronizing with OPS243 sensor")
+	ready := false
+	for !ready {
+		reading := readPort(port)
+		_, err := strconv.ParseFloat(reading, 64)
+		if err == nil {
+			fmt.Println("Receiving OPS243 readings, ready!")
+			ready = true
+		} else {
+			fmt.Println("Synchronizing")
+		}
+	}
+
+	initOPS243(port)
+
+	// Get speed
+	for {
+		reading := readPort(port)
+		speed, _ := strconv.ParseFloat(reading, 64)
+
+		event := SpeedEvent{
+			Type:      "speed",
+			Timestamp: time.Now().Format(time.RFC3339),
+			Reading:   speed,
+			Units:     "mph",
+			UUID:      uuid.NewString(),
+		}
+
+		jsonData, err := json.Marshal(event)
+		if err != nil {
+			log.Panic(err)
+		} else {
+			_, err := publisher.Send(fmt.Sprintf("%s %s", topic, string(jsonData)), 0)
+			if err != nil {
+				log.Panic(err)
+			}
+			fmt.Println("Sent:  ", string(jsonData))
+		}
+
+	}
+
 }
